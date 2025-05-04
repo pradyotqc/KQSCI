@@ -262,3 +262,140 @@ def kqsci_solver_full_parallel(qubit_hamiltonian, states, output_file, n_jobs=-1
     return eigenvalues, eigenvectors
 #%%
 # ---------------------------------------------------------------------------------------------------------------------------
+import numpy as np
+from scipy.linalg import eigh
+
+def orthonormalize_statevectors(statevectors):
+    # Stack the statevectors into a matrix
+    V = np.column_stack([sv.data for sv in statevectors])  # assuming sv.data is the raw vector
+    Q, R = np.linalg.qr(V)  # QR decomposition
+    return Q  # Orthonormal basis vectors as columns
+
+def kqsci_solver_QR(qubit_hamiltonian, combined_statevectors, kqsci_size):
+    # Prepare statevectors
+    evolution_times = list(combined_statevectors.keys())
+    raw_statevectors = [combined_statevectors[t] for t in evolution_times[:kqsci_size]]
+
+    # Orthonormalize (QR or SVD can be used)
+    ortho_basis_matrix = orthonormalize_statevectors(raw_statevectors)
+    
+    # Construct new Statevector objects from orthonormal basis
+    from qiskit.quantum_info import Statevector
+    ortho_statevectors = [Statevector(vec) for vec in ortho_basis_matrix.T]  # one per column
+
+    # Construct subspace Hamiltonian and overlap matrices
+    E_sub = np.zeros((kqsci_size, kqsci_size), dtype=complex)
+    S_sub = np.zeros((kqsci_size, kqsci_size), dtype=complex)
+    
+    for i in range(kqsci_size):
+        for j in range(kqsci_size):
+            state_evolve = ortho_statevectors[j].evolve(qubit_hamiltonian)
+            state_inner_h = ortho_statevectors[i].inner(state_evolve)
+            state_inner_s = ortho_statevectors[i].inner(ortho_statevectors[j])
+
+            E_sub[i, j] = state_inner_h
+            S_sub[i, j] = state_inner_s
+
+    # Overlap should now be close to identity, but regularize just in case
+    # S_sub = regularize_matrix(S_sub)
+
+    # Solve the generalized eigenvalue problem
+    eigenvalues, eigenvectors = eigh(E_sub, S_sub)
+    return eigenvalues, eigenvectors
+#%%
+# ---------------------------------------------------------------------------------------------------------------------------
+def kqsci_eign_QR(state_probabilities, num_qubits, sample_space_size, kqsci_size, qubit_hamiltonian):
+    """
+    Perform KQSCI eigenvalue and eigenvector computation.
+
+    Parameters:
+        state_probabilities (dict): Probabilities of evolved states.
+        num_qubits (int): Number of qubits.
+        sample_space_size (int): Size of the sample space.
+        kqsci_size (int): Size of the KQSCI subspace.
+        qubit_hamiltonian (SparsePauliOp): Qubit Hamiltonian.
+
+    Returns:
+        tuple: Eigenvalues and eigenvectors.
+    """
+    # Read the evolved states by application of unitaries by time evolution
+    chis = spin_adapted_selection(state_probabilities, int(num_qubits / 2), sample_space_size)
+    phis = krylov_basis(chis)
+    
+    # Call the solver function
+    eigenvalues, eigenvectors = kqsci_solver_QR(qubit_hamiltonian, phis, kqsci_size)
+    
+    return eigenvalues, eigenvectors
+#%%
+# ---------------------------------------------------------------------------------------------------------------------------
+# import numpy as np
+# from scipy.linalg import eigh
+# from qiskit.quantum_info import Statevector
+
+def orthonormalize_statevectors_svd(statevectors, threshold=1e-8):
+    # Stack the statevectors into a matrix (columns are state vectors)
+    V = np.column_stack([sv.data for sv in statevectors])  # assumes Statevector.data is the raw numpy vector
+
+    # Perform SVD
+    U, S_vals, Vh = np.linalg.svd(V, full_matrices=False)
+
+    # Filter by singular values (keep only numerically independent directions)
+    rank = np.sum(S_vals > threshold)
+    U_reduced = U[:, :rank]
+
+    return U_reduced, rank  # Return orthonormal basis and its size
+
+def kqsci_solver_SVD(qubit_hamiltonian, combined_statevectors, kqsci_size):
+    # Get raw statevectors from dictionary
+    evolution_times = list(combined_statevectors.keys())
+    raw_statevectors = [combined_statevectors[t] for t in evolution_times[:kqsci_size]]
+
+    # Orthonormalize using SVD
+    ortho_basis_matrix, rank = orthonormalize_statevectors_svd(raw_statevectors)
+
+    # Convert each orthonormal column vector into a Statevector
+    ortho_statevectors = [Statevector(ortho_basis_matrix[:, i]) for i in range(rank)]
+
+    # Construct Hamiltonian and overlap matrices (size rank x rank)
+    E_sub = np.zeros((rank, rank), dtype=complex)
+    S_sub = np.zeros((rank, rank), dtype=complex)
+
+    for i in range(rank):
+        for j in range(rank):
+            state_evolve = ortho_statevectors[j].evolve(qubit_hamiltonian)
+            state_inner_h = ortho_statevectors[i].inner(state_evolve)
+            state_inner_s = ortho_statevectors[i].inner(ortho_statevectors[j])
+
+            E_sub[i, j] = state_inner_h
+            S_sub[i, j] = state_inner_s
+
+    # Overlap matrix should now be very close to identity, but regularize just in case
+    # S_sub = regularize_matrix(S_sub)
+
+    # Solve the generalized eigenvalue problem
+    eigenvalues, eigenvectors = eigh(E_sub, S_sub)
+    return eigenvalues, eigenvectors
+#%%
+# ---------------------------------------------------------------------------------------------------------------------------
+def kqsci_eign_SVD(state_probabilities, num_qubits, sample_space_size, kqsci_size, qubit_hamiltonian):
+    """
+    Perform KQSCI eigenvalue and eigenvector computation.
+
+    Parameters:
+        state_probabilities (dict): Probabilities of evolved states.
+        num_qubits (int): Number of qubits.
+        sample_space_size (int): Size of the sample space.
+        kqsci_size (int): Size of the KQSCI subspace.
+        qubit_hamiltonian (SparsePauliOp): Qubit Hamiltonian.
+
+    Returns:
+        tuple: Eigenvalues and eigenvectors.
+    """
+    # Read the evolved states by application of unitaries by time evolution
+    chis = spin_adapted_selection(state_probabilities, int(num_qubits / 2), sample_space_size)
+    phis = krylov_basis(chis)
+    
+    # Call the solver function
+    eigenvalues, eigenvectors = kqsci_solver_SVD(qubit_hamiltonian, phis, kqsci_size)
+    
+    return eigenvalues, eigenvectors
